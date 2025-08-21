@@ -1,73 +1,63 @@
 # -*- coding: utf-8 -*-
 import dataiku, pandas as pd, re
 
-# ---------- helpers ----------
 def norm(s): return re.sub(r"\s+", " ", str(s).strip().lower())
 def slugify(s): return re.sub(r"[^a-z0-9]+", "_", norm(s)).strip("_")
 def is_yes(v): return ("" if v is None else str(v)).strip().upper() == "O"
 
-def csv_vals(vals):
-    return ",".join("'" + str(v).replace("'", "''") + "'" for v in vals)
-
-def clause_from_codes(col, codes, flag):
-    """IN/NOT IN, et si on détecte un motif (%) on passe en LIKE/NOT LIKE"""
-    codes = [str(c) for c in codes]
-    has_pattern = any("%" in c or "_" in c for c in codes)
-    if has_pattern:
-        parts = [f"{col} {'LIKE' if is_yes(flag) else 'NOT LIKE'} '{c}'" for c in codes]
-        return " OR ".join(parts)  # plusieurs motifs -> OR
-    else:
-        return f"{col} {'IN' if is_yes(flag) else 'NOT IN'} ({csv_vals(codes)})"
-
-# ---------- mapping "en dur" des 5 lignes ----------
-PRO_MAP = {
-    "ER (Entrepreneurs)":            ["ER"],
-    "AG (Agriculteurs)":             ["AG"],
-    "AC (Artisans Commerçants)":     ["AC"],
-    "AS (associations)":             ["AS"],
-    "PL (Professions Libérales)":    ["PL"],
+# mapping particularités -> colonne ou transco
+PART_MAP = {
+    "INB (interdit bancaire)":          "IINB != 1",
+    "ING (interdit bancaire généralisé)": "IING != 1",
+    "INJ (interdit judiciaire)":        "IINJ != 1",
+    "CSG (compte sous surveillance)":   "ICSG != 1",
+    "OCI (ouverture de compte imposée)": "IOCI != 1",
+    "EDX (engagement douteux)":         "IEDX != 1",
+    "SAR (saisies)":                    "ISAR != 1",
+    "BLA (blanchiment)":                "IBLA != 1",
+    "ICP (incident de crédit aux particuliers)": "IIMPPRET != 1",  # ou plusieurs codes
+    "ENR (entrée en relation à régulariser)":   "IENR != 1",
+    "DDENONCE":                         "DDENONCE IS NULL",
+    "FICP":                             "ZeroIfNull(RC.CCLTFICP) NOT IN (1,2)",
+    "Risques SAGED":                    "Coalesce(RC.CRISSAGE,'') NOT IN ('R6','R9')"
 }
-COL = "CSEGRETAIL"  # colonne cible
 
-# ---------- lecture du dataset ----------
+# lecture dataset
 ds = dataiku.Dataset("Shared_Documents")
 df = ds.get_dataframe()
-df["_var_raw"]  = df["Variable"].astype(str).str.strip()   # on garde le texte exact
+df["_var_raw"]  = df["Variable"].astype(str).str.strip()
 df["_var_norm"] = df["_var_raw"].map(norm)
 
-# ---------- calcul des filtres ----------
-filters_pro = {}
+filters_part = {}
 rows = []
 
-for label, codes in PRO_MAP.items():
-    # on matche sur le texte exact tel qu’affiché dans l’Excel
-    sub = df[df["_var_raw"] == label]
-    if sub.empty:
+for label, clause in PART_MAP.items():
+    sub = df[df["_var_raw"].str.contains(label.split()[0], case=False, na=False)]
+    if sub.empty: 
         continue
     flag = str(sub["OUI_NON"].dropna().astype(str).iloc[0]) if sub["OUI_NON"].notna().any() else ""
-    clause = clause_from_codes(COL, codes, flag)
+    if is_yes(flag):   # seulement si O
+        key = slugify(label.split()[0])
+        var_name = f"filters_part.{key}"
+        filters_part[var_name] = clause
+        rows.append({"name": var_name, "label": label, "value": clause})
 
-    short_key = slugify(label.split()[0])   # ex. 'ER (...)' -> 'er'
-    var_name  = f"filters_pro.{short_key}"
-    filters_pro[var_name] = clause
-    rows.append({"name": var_name, "label": label, "value": clause})
+# grosse variable OR (toutes les exclusions en même temps)
+active = [v for v in filters_part.values() if v]
+filtre_particularites = " AND ".join(f"({c})" for c in active) if active else "1=1"
 
-# ---------- grosse variable (OR des 5) ----------
-active = [v for v in filters_pro.values() if v and v != "1=1"]
-filtre_ciblage_pro = " OR ".join(f"({c})" for c in active) if active else "1=1"
+filters_part["filtre_particularites"] = filtre_particularites
+rows.append({"name": "filtre_particularites", "label": "Filtre Particularités", "value": filtre_particularites})
 
-filters_pro["filtre_ciblage_pro"] = filtre_ciblage_pro
-rows.append({"name": "filtre_ciblage_pro", "label": "Filtre Ciblage Pro (OR)", "value": filtre_ciblage_pro})
-
-# ---------- enregistrer dans les variables de projet (sans toucher aux autres) ----------
+# maj variables projet
 client = dataiku.api_client()
 project = client.get_project(dataiku.default_project_key())
 vars_obj = project.get_variables()
 std = vars_obj.get("standard", {})
-std.update(filters_pro)                # clés : filters_pro.er / ... + filtre_ciblage_pro
+std.update(filters_part)
 vars_obj["standard"] = std
 project.set_variables(vars_obj)
 
-# ---------- dataset de traçabilité ----------
+# dataset traçabilité
 out_df = pd.DataFrame(rows, columns=["name", "label", "value"])
-dataiku.Dataset("VARIABLES_PRO").write_with_schema(out_df)
+dataiku.Dataset("VARIABLES_PARTICULARITES").write_with_schema(out_df)
