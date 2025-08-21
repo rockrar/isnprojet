@@ -1,0 +1,74 @@
+# -*- coding: utf-8 -*-
+import dataiku, pandas as pd, re
+
+# -------- helpers --------
+def norm(s): return re.sub(r"\s+", " ", str(s).strip().lower())
+def slugify(s): return re.sub(r"[^a-z0-9]+", "_", norm(s)).strip("_")
+def csv_for_sql(vals): return ",".join("'" + v.replace("'", "''") + "'" for v in vals)
+
+def clause_in(col, vals, flag):
+    return f"{col} IN ({csv_for_sql(vals)})" if str(flag).strip().upper()=="O" \
+           else f"{col} NOT IN ({csv_for_sql(vals)})"
+
+# -------- mapping dur : libellé -> (colonne, liste de codes) --------
+SEG_MAP = {
+    # libellé exact (tel qu’en colonne Variable) -> (colonne, valeurs)
+    "Etabli (MA C.0 Etabli Stock+ MA E.0 Patrimonial – Stock)" :
+        ("segment_ma_mm", ["MAC0","MAE0"]),
+    "Développement (MA C.1 Etabli - EER MA D.0 Evolutif - Stock MA D.1 Evolutif - EER - MA E.1 Patrimonial – EER)" :
+        ("segment_ma_mm", ["MAC1","MAE1","MADO","MAD1"]),
+    "Evolutif (MM 012 Grand Public potentiel Affluent- MM 011 Affluent à conquérir)" :
+        ("segment_ma_mm", ["MM012","MM011"]),
+    "Etudiant Cursus + (MM 021 Etudiant Cursus Plus)" :
+        ("segment_ma_mm", ["MM021"]),
+    "Collaborateurs (MA A.0 Collaborateur - Stock MA A.1 Collaborateur - EER - MM 10 - Grand Public Collaborateurs)" :
+        ("segment_ma_mm", ["MAA0","MAA1","MM10"]),
+    "Essentiel (MM 03 - Grand Public Essentiel- MM 04 - Grand Public en développement- MM 08 - Grand Public EER)" :
+        ("segment_ma_mm", ["MM03","MM04","MM08"]),
+    "Grand Public Gestion (MM 05 - Grand Public)" :
+        ("segment_ma_mm", ["MM05"]),
+    "NR (MA B.0 Non-Résident - Stock- MM 09 - Grand Public Non-résident)" :
+        ("segment_ma_mm", ["MAB0","MAB1","MM09"]),
+    "Public Eckert - MM 13 - Grand Public Risque EDX CER )" :
+        ("segment_ma_mm", ["MM06","MM07","MM13","MM11"]),
+    # si ton Excel a d'autres libellés, ajoute-les ici sur le même modèle
+}
+
+# -------- lecture du dataset (pour récupérer O/N par libellé) --------
+ds = dataiku.Dataset("Shared_Documents")   # adapte si le nom diffère
+df = ds.get_dataframe()
+df["_var_norm"] = df["Variable"].astype(str)
+
+# -------- calcul des filtres --------
+filters_seg = {}
+rows = []
+
+for label, (col, codes) in SEG_MAP.items():
+    sub = df[df["_var_norm"].astype(str).str.strip() == label]
+    if sub.empty:
+        continue
+    flag = str(sub["OUI_NON"].dropna().astype(str).iloc[0]) if sub["OUI_NON"].notna().any() else ""
+    clause = clause_in(col, codes, flag)
+
+    key = slugify(label)
+    filters_seg[f"filters_seg.{key}"] = clause
+    rows.append({"name": f"filters_seg.{key}", "label": label, "value": clause})
+
+# WHERE global (OR)
+active = [v for v in filters_seg.values() if v and v != "1=1"]
+where_seg = " OR ".join(f"({c})" for c in active) if active else "1=1"
+filters_seg["filters_seg.where_seg"] = where_seg
+rows.append({"name": "filters_seg.where_seg", "label": "WHERE Segmentation (OR)", "value": where_seg})
+
+# -------- poser variables de projet --------
+client = dataiku.api_client()
+project = client.get_project(dataiku.default_project_key())
+vars_obj = project.get_variables()
+std = vars_obj.get("standard", {})
+std.update(filters_seg)            # clés plates: filters_seg.xxx
+vars_obj["standard"] = std
+project.set_variables(vars_obj)
+
+# -------- dataset de traçabilité --------
+out_df = pd.DataFrame(rows, columns=["name","label","value"])
+dataiku.Dataset("VARIABLES_SEGMENTATION").write_with_schema(out_df)
