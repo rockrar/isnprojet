@@ -2,62 +2,47 @@
 import dataiku, pandas as pd, re
 
 def norm(s): return re.sub(r"\s+", " ", str(s).strip().lower())
-def slugify(s): return re.sub(r"[^a-z0-9]+", "_", norm(s)).strip("_")
 def is_yes(v): return ("" if v is None else str(v)).strip().upper() == "O"
 
-# mapping particularités -> colonne ou transco
-PART_MAP = {
-    "INB (interdit bancaire)":          "IINB != 1",
-    "ING (interdit bancaire généralisé)": "IING != 1",
-    "INJ (interdit judiciaire)":        "IINJ != 1",
-    "CSG (compte sous surveillance)":   "ICSG != 1",
-    "OCI (ouverture de compte imposée)": "IOCI != 1",
-    "EDX (engagement douteux)":         "IEDX != 1",
-    "SAR (saisies)":                    "ISAR != 1",
-    "BLA (blanchiment)":                "IBLA != 1",
-    "ICP (incident de crédit aux particuliers)": "IIMPPRET != 1",  # ou plusieurs codes
-    "ENR (entrée en relation à régulariser)":   "IENR != 1",
-    "DDENONCE":                         "DDENONCE IS NULL",
-    "FICP":                             "ZeroIfNull(RC.CCLTFICP) NOT IN (1,2)",
-    "Risques SAGED":                    "Coalesce(RC.CRISSAGE,'') NOT IN ('R6','R9')"
-}
+COL = "COALESCE(RC.CFONFDCEXT, RC.CFONFDCINT)"
+FDC_CODES = ["CTX","CID","CRD","CSS","COS","CSU","CSE","SUC","CLO"]
 
-# lecture dataset
-ds = dataiku.Dataset("Shared_Documents")
+# --- lire dataset source ---
+ds = dataiku.Dataset("Shared_Documents")   # adapte si besoin
 df = ds.get_dataframe()
 df["_var_raw"]  = df["Variable"].astype(str).str.strip()
-df["_var_norm"] = df["_var_raw"].map(norm)
 
-filters_part = {}
+filters_fdc = {}
 rows = []
 
-for label, clause in PART_MAP.items():
-    sub = df[df["_var_raw"].str.contains(label.split()[0], case=False, na=False)]
-    if sub.empty: 
+for code in FDC_CODES:
+    sub = df[df["_var_raw"] == code]
+    if sub.empty:
         continue
+
     flag = str(sub["OUI_NON"].dropna().astype(str).iloc[0]) if sub["OUI_NON"].notna().any() else ""
-    if is_yes(flag):   # seulement si O
-        key = slugify(label.split()[0])
-        var_name = f"filters_part.{key}"
-        filters_part[var_name] = clause
-        rows.append({"name": var_name, "label": label, "value": clause})
+    if is_yes(flag):
+        clause = f"{COL} NOT IN ('{code}')"
+        var_name = f"filters_fdc.{code.lower()}"
+        filters_fdc[var_name] = clause
+        rows.append({"name": var_name, "label": code, "value": clause})
+    # si N/vide : on n'ajoute rien (pas d'exclusion)
 
-# grosse variable OR (toutes les exclusions en même temps)
-active = [v for v in filters_part.values() if v]
-filtre_particularites = " AND ".join(f"({c})" for c in active) if active else "1=1"
+# --- gros filtre (AND des exclusions actives) ---
+actives = [v for v in filters_fdc.values() if v]
+filtre_fdc = " AND ".join(f"({c})" for c in actives) if actives else "1=1"
+filters_fdc["filtre_fdc"] = filtre_fdc
+rows.append({"name": "filtre_fdc", "label": "Filtre FDC (AND)", "value": filtre_fdc})
 
-filters_part["filtre_particularites"] = filtre_particularites
-rows.append({"name": "filtre_particularites", "label": "Filtre Particularités", "value": filtre_particularites})
-
-# maj variables projet
+# --- écrire variables de projet (sans toucher aux autres) ---
 client = dataiku.api_client()
 project = client.get_project(dataiku.default_project_key())
 vars_obj = project.get_variables()
 std = vars_obj.get("standard", {})
-std.update(filters_part)
+std.update(filters_fdc)                      # ex: filters_fdc.ctx, ..., filtre_fdc
 vars_obj["standard"] = std
 project.set_variables(vars_obj)
 
-# dataset traçabilité
-out_df = pd.DataFrame(rows, columns=["name", "label", "value"])
-dataiku.Dataset("VARIABLES_PARTICULARITES").write_with_schema(out_df)
+# --- dataset de sortie ---
+out_df = pd.DataFrame(rows, columns=["name","label","value"])
+dataiku.Dataset("VARIABLES_FDC").write_with_schema(out_df)
