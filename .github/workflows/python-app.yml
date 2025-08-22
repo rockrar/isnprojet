@@ -1,48 +1,63 @@
 # -*- coding: utf-8 -*-
 import dataiku, pandas as pd, re
 
+# ------- helpers -------
 def norm(s): return re.sub(r"\s+", " ", str(s).strip().lower())
-def is_yes(v): return ("" if v is None else str(v)).strip().upper() == "O"
+def parse_list(cell):
+    """'14, 17;25 00Z' -> ['14','17','25','00Z']"""
+    if cell is None: return []
+    toks = re.split(r"[;,]\s*|\s+", str(cell).strip())
+    return [t for t in toks if t]
 
-COL = "COALESCE(RC.CFONFDCEXT, RC.CFONFDCINT)"
-FDC_CODES = ["CTX","CID","CRD","CSS","COS","CSU","CSE","SUC","CLO"]
+def csv_for_sql(items):
+    if not items: return ""
+    def q(x): return "'" + str(x).replace("'", "''") + "'"
+    return ",".join(q(x) for x in items)
 
-# --- lire dataset source ---
+def make_in(col, values):
+    return "1=1" if not values else f"{col} IN ({csv_for_sql(values)})"
+
+# ------- lire dataset source -------
 ds = dataiku.Dataset("Shared_Documents")   # adapte si besoin
 df = ds.get_dataframe()
-df["_var_raw"]  = df["Variable"].astype(str).str.strip()
+df["_var_norm"] = df["Variable"].astype(str).map(norm)
 
-filters_fdc = {}
+# libellés attendus (tels que dans la colonne Variable)
+LABEL_ECO = norm("Code ECO")
+LABEL_APE = norm("Code APE")
+
+filters = {}
 rows = []
 
-for code in FDC_CODES:
-    sub = df[df["_var_raw"] == code]
-    if sub.empty:
-        continue
+# ---- Code ECO -> RC.CECOCLI ----
+sub = df[df["_var_norm"] == LABEL_ECO]
+eco_vals = parse_list(sub.iloc[0]["OUI_NON"]) if not sub.empty else []
+eco_clause = make_in("RC.CECOCLI", eco_vals)
+filters["filters_pro_code.code_eco"] = eco_clause
+rows.append({"name": "filters_pro_code.code_eco", "label": "Code ECO", "value": eco_clause})
 
-    flag = str(sub["OUI_NON"].dropna().astype(str).iloc[0]) if sub["OUI_NON"].notna().any() else ""
-    if is_yes(flag):
-        clause = f"{COL} NOT IN ('{code}')"
-        var_name = f"filters_fdc.{code.lower()}"
-        filters_fdc[var_name] = clause
-        rows.append({"name": var_name, "label": code, "value": clause})
-    # si N/vide : on n'ajoute rien (pas d'exclusion)
+# ---- Code APE -> DPR.CAPE5 ----
+sub = df[df["_var_norm"] == LABEL_APE]
+ape_vals = parse_list(sub.iloc[0]["OUI_NON"]) if not sub.empty else []
+ape_clause = make_in("DPR.CAPE5", ape_vals)
+filters["filters_pro_code.code_ape"] = ape_clause
+rows.append({"name": "filters_pro_code.code_ape", "label": "Code APE", "value": ape_clause})
 
-# --- gros filtre (AND des exclusions actives) ---
-actives = [v for v in filters_fdc.values() if v]
-filtre_fdc = " AND ".join(f"({c})" for c in actives) if actives else "1=1"
-filters_fdc["filtre_fdc"] = filtre_fdc
-rows.append({"name": "filtre_fdc", "label": "Filtre FDC (AND)", "value": filtre_fdc})
+# ---- WHERE global (AND des deux) ----
+active = [v for v in (eco_clause, ape_clause) if v != "1=1"]
+where_all = " AND ".join(f"({c})" for c in active) if active else "1=1"
+filters["filtre_pro_code"] = where_all
+rows.append({"name": "filtre_pro_code", "label": "Filtre PRO Code (AND)", "value": where_all})
 
-# --- écrire variables de projet (sans toucher aux autres) ---
+# ------- écrire variables de projet (sans écraser le reste) -------
 client = dataiku.api_client()
 project = client.get_project(dataiku.default_project_key())
 vars_obj = project.get_variables()
 std = vars_obj.get("standard", {})
-std.update(filters_fdc)                      # ex: filters_fdc.ctx, ..., filtre_fdc
+std.update(filters)
 vars_obj["standard"] = std
 project.set_variables(vars_obj)
 
-# --- dataset de sortie ---
-out_df = pd.DataFrame(rows, columns=["name","label","value"])
-dataiku.Dataset("VARIABLES_FDC").write_with_schema(out_df)
+# ------- dataset de sortie -------
+out_df = pd.DataFrame(rows, columns=["name", "label", "value"])
+dataiku.Dataset("VARIABLES_PRO_CODE").write_with_schema(out_df)
