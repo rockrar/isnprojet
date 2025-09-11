@@ -1,92 +1,116 @@
 # -*- coding: utf-8 -*-
 import dataiku, pandas as pd, re
 
+# ---------- Helpers ----------
 def norm(s): return re.sub(r"\s+", " ", str(s).strip().lower())
 def is_yes(v): return ("" if v is None else str(v)).strip().upper() == "O"
+def slug(s):  return re.sub(r"[^a-z0-9]+","_", norm(s)).strip("_")
 
 def in_not_in(col, code, flag):
     op = "IN" if is_yes(flag) else "NOT IN"
     return f"{col} {op} ({code})"
 
-def equal_notequal(col, val, flag):
+def eq_neq(col, val, flag):
     return f"{col} = {val}" if is_yes(flag) else f"{col} <> {val}"
 
 def null_or_zero(flag, col="CCSELGCP"):
-    # Hors BPF+GF (O) -> NULL ou 0 ; N -> NOT (NULL ou 0)
+    # O  -> NULL ou 0
+    # N  -> NOT (NULL ou 0)
     if is_yes(flag):
         return f"({col} IS NULL OR {col} = 0)"
     else:
         return f"({col} IS NOT NULL AND {col} <> 0)"
 
+def only_bpf_gf(flag, col="CCSELGCP"):
+    # "Uniquement BPF + GF"
+    # O  -> NOT (NULL ou 0)
+    # N  -> (NULL ou 0)
+    if is_yes(flag):
+        return f"({col} IS NOT NULL AND {col} <> 0)"
+    else:
+        return f"({col} IS NULL OR {col} = 0)"
+
 def sci_32_35(flag, col="CNATJUR"):
-    # O -> 32,33,34,35 ; N -> NOT IN 32..35
     codes = "32,33,34,35"
     return in_not_in(col, codes, flag)
 
 def pro_vie_pro(flag):
-    # O  -> CNATFOY=4 ET CSEGRETAIL NE 'AS'
-    # N  -> CNATFOY NOT IN (4) ET CSEGRETAIL IN ('AS')
+    # O  -> CNATFOY IN (4)  AND CSEGRETAIL <> 'AS'
+    # N  -> CNATFOY NOT IN (4) AND CSEGRETAIL =  'AS'
     if is_yes(flag):
         return "(CNATFOY IN (4) AND CSEGRETAIL <> 'AS')"
     else:
         return "(CNATFOY NOT IN (4) AND CSEGRETAIL = 'AS')"
 
-# --------- lecture des choix ---------
+# ---------- Lecture ----------
 ds = dataiku.Dataset("Shared_Documents")
 df = ds.get_dataframe()
 df["_var_norm"] = df["Variable"].astype(str).map(norm)
 
 def flag_of(label):
     sub = df[df["_var_norm"] == norm(label)]
-    return str(sub["OUI_NON"].dropna().astype(str).iloc[0]).strip().upper() if not sub.empty and sub["OUI_NON"].notna().any() else ""
+    return str(sub["OUI_NON"].dropna().astype(str).iloc[0]).strip().upper() \
+           if not sub.empty and sub["OUI_NON"].notna().any() else ""
 
-# --------- règles marché ---------
+# ---------- Règles Marché ----------
 RULES = {
-    "particuliers":               lambda f: in_not_in("CNATFOY", "1", f),
-    "professionnels vie pri":     lambda f: in_not_in("CNATFOY", "2", f),
+    "particuliers":                                   lambda f: in_not_in("CNATFOY", "1", f),
+    "professionnels vie pri":                         lambda f: in_not_in("CNATFOY", "2", f),
     "professionnels vie pro (ei pro + pm, hors associations)": pro_vie_pro,
-    "associations":               lambda f: in_not_in("CNATFOY", "5", f),
-    "entrepreneurs":              lambda f: in_not_in("CNATFOY", "9", f),
-    "hors sci (selon la nature juridique)": sci_32_35,
-    "hors bpf + gf":              lambda f: null_or_zero(f, "CCSELGCP"),
-    "uniquement bpf + gf":        lambda f: null_or_zero("N" if is_yes(f) else "O", "CCSELGCP"),
-    "hors territoire de monaco":  lambda f: equal_notequal("SUCC", "9170", "N" if is_yes(f) else "O"),  # O => SUCC <> 9170
-    "uniquement territoire de monaco": lambda f: equal_notequal("SUCC", "9171", f),
-    "hors hb!":                   lambda f: equal_notequal("DR", "8082", "N" if is_yes(f) else "O"),     # O => DR <> 8082
-    "uniquement hb!":             lambda f: equal_notequal("DR", "8082", f),
+    "associations":                                   lambda f: in_not_in("CNATFOY", "5", f),
+    "entrepreneurs":                                  lambda f: in_not_in("CNATFOY", "9", f),
+    "hors sci (selon la nature juridique)":           sci_32_35,
+    "hors bpf + gf":                                  null_or_zero,
+    "uniquement bpf + gf":                            only_bpf_gf,
+    "hors territoire de monaco":                      lambda f: eq_neq("SUCC", "9170", "N" if is_yes(f) else "O"),  # O => SUCC <> 9170
+    "uniquement territoire de monaco":                lambda f: eq_neq("SUCC", "9171", f),
+    "hors hb!":                                       lambda f: eq_neq("DR",   "8082", "N" if is_yes(f) else "O"),  # O => DR <> 8082
+    "uniquement hb!":                                 lambda f: eq_neq("DR",   "8082", f),
 }
 
-# --------- construction des variables ---------
+# ---------- Construction des variables + logique OR/AND ----------
 filters = {}
 rows = []
+include_clauses = []  # pour les O -> OR
+exclude_clauses = []  # pour les N -> AND
 
 for label_norm, rule_fn in RULES.items():
-    f = flag_of(label_norm)  # "O" / "N" / ""
-    if f == "":
+    flag = flag_of(label_norm)  # "O", "N" ou ""
+    if not flag:
         clause = "1=1"
     else:
-        clause = rule_fn(f)
-    var_name = f"filters_marche.{re.sub(r'[^a-z0-9]+','_', label_norm).strip('_')}"
+        clause = rule_fn(flag)
+        if is_yes(flag):
+            include_clauses.append(clause)
+        else:
+            exclude_clauses.append(clause)
+
+    var_name = f"filters_marche.{slug(label_norm)}"
     filters[var_name] = clause
     rows.append({"name": var_name, "label": label_norm, "value": clause})
 
-# Globale = AND des clauses actives (≠ 1=1)
-active = [v for v in filters.values() if v != "1=1"]
-filtre_marche = " AND ".join(f"({c})" for c in active) if active else "1=1"
-filters["filtre_marche"] = filtre_marche
-rows.append({"name": "filtre_marche", "label": "Filtre Marché (AND)", "value": filtre_marche})
+# OR des O
+or_part  = " OR ".join(f"({c})" for c in include_clauses) if include_clauses else ""
+# AND des N
+and_part = " AND ".join(f"({c})" for c in exclude_clauses) if exclude_clauses else ""
 
-# --------- écrire sans écraser le reste ---------
+parts = []
+if or_part:  parts.append(f"({or_part})")
+if and_part: parts.append(f"({and_part})")
+filtre_marche = " AND ".join(parts) if parts else "1=1"
+
+filters["filtre_marche"] = filtre_marche
+rows.append({"name": "filtre_marche", "label": "Filtre Marché (OR des O, AND des N)", "value": filtre_marche})
+
+# ---------- Ecriture variables projet (sans écraser les autres) ----------
 client = dataiku.api_client()
 project = client.get_project(dataiku.default_project_key())
 vars_obj = project.get_variables()
 std = vars_obj.get("standard", {})
-
-# on met à jour uniquement nos clés
-std.update(filters)
+std.update(filters)               # on n’ajoute que filters_marche.* + filtre_marche
 vars_obj["standard"] = std
 project.set_variables(vars_obj)
 
-# --------- dataset de sortie ---------
+# ---------- Dataset de traçabilité ----------
 out_df = pd.DataFrame(rows, columns=["name","label","value"])
 dataiku.Dataset("VARIABLES_MARCHE").write_with_schema(out_df)
