@@ -1,89 +1,31 @@
 # -*- coding: utf-8 -*-
-import dataiku, pandas as pd, re
+import io, re, unicodedata
+import dataiku
+import pandas as pd
 
-# ---------- Helpers ----------
-def norm(s): return re.sub(r"\s+", " ", str(s).strip().lower())
-def is_yes(v): return ("" if v is None else str(v)).strip().upper() == "O"
-def slug(s):  return re.sub(r"[^a-z0-9]+","_", norm(s)).strip("_")
+# ---- Inputs / Outputs
+SRC = dataiku.Dataset("version")          # ton dataset source
+OUT = dataiku.Folder("TMIO8X8i")          # ton Managed Folder de sortie
+COL_REGION = "RÉGION"                     # nom exact de la colonne
 
-def in_if_yes(col, code, flag):
-    return f"{col} IN ({code})" if is_yes(flag) else "1=1"
+# ---- Util: rendre le nom de fichier sûr (supprime accents, espaces, etc.)
+def slugify(value):
+    s = str(value) if pd.notna(value) else "NA"
+    s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii")
+    s = re.sub(r"[^A-Za-z0-9._-]+", "_", s).strip("_")
+    return s or "NA"
 
-def eq_if_yes(col, val, flag):
-    return f"{col} = {val}" if is_yes(flag) else "1=1"
+# ---- Lecture
+df = SRC.get_dataframe()
 
-def neq_if_yes(col, val, flag):
-    return f"{col} <> {val}" if is_yes(flag) else "1=1"
+# ---- Ecriture: un fichier par région
+for region, sub in df.groupby(COL_REGION, dropna=False):
+    safe = slugify(region)
+    # dossier type partition pour rester propre
+    path = f"region={safe}/data.csv"
 
-def null_or_zero_if_yes(flag, col="CCSELGCP"):
-    return f"({col} IS NULL OR {col} = 0)" if is_yes(flag) else "1=1"
+    buf = io.StringIO()
+    sub.to_csv(buf, index=False)
+    OUT.upload_stream(path, buf.getvalue().encode("utf-8"))
 
-def not_null_or_zero_if_yes(flag, col="CCSELGCP"):
-    return f"({col} IS NOT NULL AND {col} <> 0)" if is_yes(flag) else "1=1"
-
-def sci_32_35_if_yes(flag, col="CNATJUR"):
-    return in_if_yes(col, "32,33,34,35", flag)
-
-def pro_vie_pro_if_yes(flag):
-    # O  -> CNATFOY IN (4) AND CSEGRETAIL <> 'AS'
-    # N/Vide -> 1=1
-    return "(CNATFOY IN (4) AND CSEGRETAIL <> 'AS')" if is_yes(flag) else "1=1"
-
-# ---------- Lecture ----------
-ds = dataiku.Dataset("Shared_Documents")        # adapte si besoin
-df = ds.get_dataframe()
-df["_var_norm"] = df["Variable"].astype(str).map(norm)
-
-def flag_of(label):
-    sub = df[df["_var_norm"] == norm(label)]
-    return str(sub["OUI_NON"].dropna().astype(str).iloc[0]).strip().upper() \
-           if not sub.empty and sub["OUI_NON"].notna().any() else ""
-
-# ---------- Règles Marché ----------
-RULES = {
-    "particuliers":                                   lambda f: in_if_yes("CNATFOY", "1", f),
-    "professionnels vie pri":                         lambda f: in_if_yes("CNATFOY", "2", f),
-    "professionnels vie pro (ei pro + pm, hors associations)": pro_vie_pro_if_yes,
-    "associations":                                   lambda f: in_if_yes("CNATFOY", "5", f),
-    "entrepreneurs":                                  lambda f: in_if_yes("CNATFOY", "9", f),
-    "hors sci (selon la nature juridique)":           sci_32_35_if_yes,
-    "hors bpf + gf":                                  null_or_zero_if_yes,
-    "uniquement bpf + gf":                            not_null_or_zero_if_yes,
-    "hors territoire de monaco":                      lambda f: neq_if_yes("SUCC", "9170", f),
-    "uniquement territoire de monaco":                lambda f: eq_if_yes("SUCC", "9171", f),
-    "hors hb!":                                       lambda f: neq_if_yes("DR",   "8082", f),
-    "uniquement hb!":                                 lambda f: eq_if_yes("DR",   "8082", f),
-}
-
-# ---------- Construction des variables + OR des 'O' ----------
-filters = {}
-rows = []
-include_clauses = []  # seules les clauses O (les autres valent 1=1)
-
-for label_norm, rule_fn in RULES.items():
-    flag = flag_of(label_norm)                 # "O", "N" ou ""
-    clause = rule_fn(flag)                     # "1=1" si N/vide
-    if clause != "1=1":
-        include_clauses.append(clause)
-
-    var_name = f"filters_marche.{slug(label_norm)}"
-    filters[var_name] = clause
-    rows.append({"name": var_name, "label": label_norm, "value": clause})
-
-# OR des O (ou 1=1 si aucune sélection)
-filtre_marche = " OR ".join(f"({c})" for c in include_clauses) if include_clauses else "1=1"
-filters["filtre_marche"] = filtre_marche
-rows.append({"name": "filtre_marche", "label": "Filtre Marché (OR des O)", "value": filtre_marche})
-
-# ---------- Écriture variables projet (sans écraser les autres) ----------
-client = dataiku.api_client()
-project = client.get_project(dataiku.default_project_key())
-vars_obj = project.get_variables()
-std = vars_obj.get("standard", {})
-std.update(filters)               # ajoute/maj uniquement filters_marche.* + filtre_marche
-vars_obj["standard"] = std
-project.set_variables(vars_obj)
-
-# ---------- Dataset de traçabilité ----------
-out_df = pd.DataFrame(rows, columns=["name","label","value"])
-dataiku.Dataset("VARIABLES_MARCHE").write_with_schema(out_df)
+print("OK : fichiers créés par région.")
