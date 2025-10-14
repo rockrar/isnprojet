@@ -2,30 +2,62 @@
 import io, re, unicodedata
 import dataiku
 import pandas as pd
+from openpyxl.utils import get_column_letter
 
 # ---- Inputs / Outputs
-SRC = dataiku.Dataset("version")          # ton dataset source
-OUT = dataiku.Folder("TMIO8X8i")          # ton Managed Folder de sortie
-COL_REGION = "RÉGION"                     # nom exact de la colonne
+SRC = dataiku.Dataset("Run_649_EER_PART_")     # ton dataset source
+OUT = dataiku.Folder("psWuQcPE")               # ton Managed Folder de sortie
+COL_REGION = "Libelle Region"                  # nom exact de la colonne région
 
-# ---- Util: rendre le nom de fichier sûr (supprime accents, espaces, etc.)
+# ---- Utile : rendre le nom de fichier sûr (accents, espaces, etc.)
 def slugify(value):
     s = str(value) if pd.notna(value) else "NA"
     s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii")
-    s = re.sub(r"[^A-Za-z0-9._-]+", "_", s).strip("_")
+    s = re.sub(r"[^A-Za-z0-9_-]+", "_", s).strip("_")
     return s or "NA"
 
 # ---- Lecture
 df = SRC.get_dataframe()
 
-# ---- Ecriture: un fichier par région
+# heuristique pour détecter les colonnes de dates/temps
+DATE_KEYS = ("date", "dt", "time", "timestamp")
+
+# ---- Ecriture : un fichier Excel par région
 for region, sub in df.groupby(COL_REGION, dropna=False):
     safe = slugify(region)
-    # dossier type partition pour rester propre
-    path = f"region={safe}/data.csv"
+    filename = f"{safe}_Run_649_EER_PART.xlsx"
 
-    buf = io.StringIO()
-    sub.to_csv(buf, index=False)
-    OUT.upload_stream(path, buf.getvalue().encode("utf-8"))
+    # Détection + typage des dates
+    date_cols = []
+    for col in sub.columns:
+        looks_like_date = any(k in col.lower() for k in DATE_KEYS) or pd.api.types.is_datetime64_any_dtype(sub[col])
+        if looks_like_date:
+            sub[col] = pd.to_datetime(sub[col], errors="coerce")
+            date_cols.append(col)
 
-print("OK : fichiers créés par région.")
+    # Toutes les autres colonnes forcées en texte (préserve zéros initiaux)
+    text_cols = [c for c in sub.columns if c not in date_cols]
+    for c in text_cols:
+        sub[c] = sub[c].astype(str)
+
+    # Écriture Excel en mémoire + formats
+    with io.BytesIO() as buffer:
+        with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+            sub.to_excel(writer, index=False, sheet_name="Données")
+            ws = writer.sheets["Données"]
+
+            # Appliquer les formats par colonne
+            for j, col in enumerate(sub.columns, start=1):
+                col_letter = get_column_letter(j)
+                if col in date_cols:
+                    # vrai datetime Excel, sans fractions de secondes
+                    for cell in ws[col_letter][1:]:   # [1:] pour ignorer l'entête
+                        cell.number_format = "yyyy-mm-dd hh:mm:ss"
+                else:
+                    # forcer texte pour garder les 0 initiaux et éviter la notation scientifique
+                    for cell in ws[col_letter][1:]:
+                        cell.number_format = "@"
+
+        OUT.upload_stream(filename, buffer.getvalue())
+
+print("✅ OK : fichiers Excel créés par région, dates au bon format et IDs en texte.")
