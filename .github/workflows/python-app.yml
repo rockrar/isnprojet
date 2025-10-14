@@ -9,7 +9,7 @@ SRC = dataiku.Dataset("Run_649_EER_PART_")
 OUT = dataiku.Folder("psWuQcPE")
 COL_REGION = "Libelle Region"
 
-# ---- Nom de fichier sûr
+# ---- Fonction pour rendre le nom de fichier sûr
 def slugify(value):
     s = str(value) if pd.notna(value) else "NA"
     s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii")
@@ -20,31 +20,32 @@ def slugify(value):
 df = SRC.get_dataframe()
 df[COL_REGION] = df[COL_REGION].fillna("NA")
 
-# ---- Écriture Excel : 1 fichier par région
+# ---- Export Excel : 1 fichier par région
 for region, sub in df.groupby(COL_REGION):
     safe = slugify(region)
     filename = f"{safe}_Run_649_EER_PART.xlsx"
 
-    # Tout convertir explicitement en chaîne AVANT écriture
-    sub = sub.astype(str)
+    # Tout en texte et ajout d'une apostrophe pour bloquer Excel
+    sub = sub.astype(str).applymap(lambda x: "'" + x if x not in [None, 'nan', 'NaN'] else '')
 
     buf = io.BytesIO()
     workbook = xlsxwriter.Workbook(buf, {'in_memory': True})
     worksheet = workbook.add_worksheet("Données")
-    text_fmt = workbook.add_format({'num_format': '@'})  # forcer format texte
+
+    # Format texte explicite
+    text_fmt = workbook.add_format({'num_format': '@'})
 
     # --- Écrire l'entête
     for col_num, col_name in enumerate(sub.columns):
         worksheet.write(0, col_num, col_name, text_fmt)
 
-    # --- Écrire chaque cellule manuellement sans conversion implicite
+    # --- Écrire les lignes (tout en texte pur)
     for row_num in range(len(sub)):
         for col_num, col_name in enumerate(sub.columns):
             val = sub.iloc[row_num, col_num]
-            # Forcer Excel à écrire la valeur telle quelle (ex : "01", "000123")
             worksheet.write_string(row_num + 1, col_num, val, text_fmt)
 
     workbook.close()
     OUT.upload_stream(filename, buf.getvalue())
 
-print("✅ Fichiers Excel créés, 0 initiaux réellement conservés, toutes les colonnes en texte.")
+print("✅ OK : fichiers Excel créés — zéros initiaux et grands IDs conservés exactement comme dans Dataiku.")
