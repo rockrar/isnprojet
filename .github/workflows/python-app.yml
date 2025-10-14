@@ -19,8 +19,11 @@ def slugify(value):
 # ---- Lecture
 df = SRC.get_dataframe()
 
+# ---- On remplace les NaN dans la colonne région pour éviter erreur de groupement
+df[COL_REGION] = df[COL_REGION].fillna("NA")
+
 # ---- Écriture : un fichier Excel (.xlsx) par région, tout en TEXTE
-for region, sub in df.groupby(COL_REGION, dropna=False):
+for region, sub in df.groupby(COL_REGION):
     safe = slugify(region)
     filename = f"{safe}_Run_649_EER_PART.xlsx"
 
@@ -34,4 +37,4 @@ for region, sub in df.groupby(COL_REGION, dropna=False):
 
     OUT.upload_stream(filename, buf.getvalue())
 
-print("OK : fichiers Excel (.xlsx) créés par région, toutes les colonnes en texte.")
+print("✅ OK : fichiers Excel (.xlsx) créés par région, toutes les colonnes en texte (zéros préservés).")
