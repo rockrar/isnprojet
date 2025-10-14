@@ -2,46 +2,56 @@
 import io, re, unicodedata
 import dataiku
 import pandas as pd
+import xlsxwriter
 
-SRC = dataiku.Dataset("Run_649_EER_PART_")
-OUT = dataiku.Folder("psWuQcPE")
-COL_REGION = "Libelle Region"
+# ---- Inputs / Outputs
+SRC = dataiku.Dataset("Run_649_EER_PART_")     # dataset source
+OUT = dataiku.Folder("psWuQcPE")               # dossier de sortie
+COL_REGION = "Libelle Region"                  # nom de la colonne région
 
+# ---- Fonction utilitaire pour noms de fichiers
 def slugify(value):
     s = str(value) if pd.notna(value) else "NA"
-    import unicodedata
     s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii")
     s = re.sub(r"[^A-Za-z0-9_-]+", "_", s).strip("_")
     return s or "NA"
 
+# ---- Lecture du dataset
 df = SRC.get_dataframe()
 
-# --- rien d'autre ne change dans ta logique ---
-
+# ---- Écriture : un fichier Excel par région
 for region, sub in df.groupby(COL_REGION, dropna=False):
     safe = slugify(region)
-    filename = f"{safe}_Run_649_EER_PART.csv"
+    filename = f"{safe}_Run_649_EER_PART.xlsx"
 
-    # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-    # Forcer texte pour Excel (zéros initiaux préservés)
-    FORCE_TEXT_COLS = ["ID Unique"]  # ajoute d'autres noms si besoin
-
-    # 1) Colonnes explicitement listées
-    for col in FORCE_TEXT_COLS:
-        if col in sub.columns:
-            s = sub[col].astype(object).where(sub[col].notna(), "")
-            sub[col] = s.astype(str).map(lambda v: "'" + v if v != "" and not v.startswith("'") else v)
-
-    # 2) Toute colonne contenant des nombres très longs (>=11 chiffres)
+    # --- Nettoyage des dates ---
     for col in sub.columns:
-        as_str = sub[col].astype(str)
-        if as_str.str.match(r"^\d{11,}$").any():
-            sub[col] = as_str.map(lambda v: "'" + v if re.fullmatch(r"\d{11,}", v or "") and not v.startswith("'") else v)
-    # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+        if any(k in col.lower() for k in ["date", "dt", "time", "timestamp"]):
+            sub[col] = pd.to_datetime(sub[col], errors="coerce").dt.strftime("%Y-%m-%d %H:%M:%S")
 
-    buf = io.StringIO()
-    buf.write("sep=;\n")
-    sub.to_csv(buf, index=False, sep=";", line_terminator="\n")
-    OUT.upload_stream(filename, buf.getvalue().encode("utf-8-sig"))
+    # --- Forcer les colonnes longues ou sensibles en texte ---
+    for col in sub.columns:
+        if sub[col].astype(str).str.match(r"^\d{11,}$").any():  # >=11 chiffres
+            sub[col] = sub[col].astype(str).apply(lambda x: "'" + x if x and not str(x).startswith("'") else x)
 
-print("✅ OK : CSV par région ; colonnes ID forcées en texte (plus de 1,09E+15).")
+    # --- Écriture Excel ---
+    with io.BytesIO() as buffer:
+        with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
+            sub.to_excel(writer, index=False, sheet_name="Données")
+
+            # format texte pour toutes les cellules
+            workbook  = writer.book
+            worksheet = writer.sheets["Données"]
+            fmt_text = workbook.add_format({'num_format': '@'})  # texte
+            fmt_date = workbook.add_format({'num_format': 'yyyy-mm-dd hh:mm:ss'})
+
+            for j, col in enumerate(sub.columns):
+                # si c’est une date -> format date sinon texte
+                if any(k in col.lower() for k in ["date", "dt", "time", "timestamp"]):
+                    worksheet.set_column(j, j, 20, fmt_date)
+                else:
+                    worksheet.set_column(j, j, 20, fmt_text)
+
+        OUT.upload_stream(filename, buffer.getvalue())
+
+print("✅ OK : fichiers Excel créés par région (dates propres, IDs conservés en texte).")
