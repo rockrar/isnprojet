@@ -2,50 +2,43 @@
 import io, re, unicodedata
 import dataiku
 import pandas as pd
-import xlsxwriter
+import xlsxwriter  # doit être installé
 
-# ---- Inputs / Outputs
 SRC = dataiku.Dataset("Run_649_EER_PART_")
 OUT = dataiku.Folder("psWuQcPE")
 COL_REGION = "Libelle Region"
 
-# ---- Fonction pour rendre le nom de fichier sûr
 def slugify(value):
     s = str(value) if pd.notna(value) else "NA"
-    s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii")
+    s = unicodedata.normalize("NFKD", s).encode("ascii","ignore").decode("ascii")
     s = re.sub(r"[^A-Za-z0-9_-]+", "_", s).strip("_")
     return s or "NA"
 
-# ---- Lecture du dataset
 df = SRC.get_dataframe()
 df[COL_REGION] = df[COL_REGION].fillna("NA")
 
-# ---- Export Excel : 1 fichier par région
 for region, sub in df.groupby(COL_REGION):
     safe = slugify(region)
     filename = f"{safe}_Run_649_EER_PART.xlsx"
 
-    # Tout en texte et ajout d'une apostrophe pour bloquer Excel
-    sub = sub.astype(str).applymap(lambda x: "'" + x if x not in [None, 'nan', 'NaN'] else '')
+    # IMPORTANT : on force tout en chaîne, sans ajouter d'apostrophe
+    sub = sub.fillna("").astype(str)
 
     buf = io.BytesIO()
-    workbook = xlsxwriter.Workbook(buf, {'in_memory': True})
-    worksheet = workbook.add_worksheet("Données")
+    wb = xlsxwriter.Workbook(buf, {'in_memory': True})
+    ws = wb.add_worksheet("Données")
+    text_fmt = wb.add_format({'num_format': '@'})  # format texte Excel
 
-    # Format texte explicite
-    text_fmt = workbook.add_format({'num_format': '@'})
+    # entêtes
+    for j, col in enumerate(sub.columns):
+        ws.write_string(0, j, col, text_fmt)
 
-    # --- Écrire l'entête
-    for col_num, col_name in enumerate(sub.columns):
-        worksheet.write(0, col_num, col_name, text_fmt)
+    # cellules (écrit en TEXTE, donc 000123 reste 000123)
+    for i in range(len(sub)):
+        for j, col in enumerate(sub.columns):
+            ws.write_string(i+1, j, sub.iloc[i, j], text_fmt)
 
-    # --- Écrire les lignes (tout en texte pur)
-    for row_num in range(len(sub)):
-        for col_num, col_name in enumerate(sub.columns):
-            val = sub.iloc[row_num, col_num]
-            worksheet.write_string(row_num + 1, col_num, val, text_fmt)
-
-    workbook.close()
+    wb.close()
     OUT.upload_stream(filename, buf.getvalue())
 
-print("✅ OK : fichiers Excel créés — zéros initiaux et grands IDs conservés exactement comme dans Dataiku.")
+print("✅ Fichiers Excel créés : colonnes écrites en texte, zéros initiaux conservés, sans apostrophes.")
