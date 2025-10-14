@@ -2,13 +2,14 @@
 import io, re, unicodedata
 import dataiku
 import pandas as pd
+import xlsxwriter  # moteur pour écrire en .xlsx
 
-# ---- Inputs / Outputs (comme dans ta recette)
-SRC = dataiku.Dataset("Run_649_EER_PART_")   # dataset source
-OUT = dataiku.Folder("psWuQcPE")             # managed folder de sortie
-COL_REGION = "Libelle Region"                # colonne région
+# ---- Inputs / Outputs
+SRC = dataiku.Dataset("Run_649_EER_PART_")   # ton dataset source
+OUT = dataiku.Folder("psWuQcPE")             # ton Managed Folder de sortie
+COL_REGION = "Libelle Region"                # nom exact de la colonne
 
-# ---- Util : nom de fichier sûr
+# ---- Utile : nom de fichier "safe"
 def slugify(value):
     s = str(value) if pd.notna(value) else "NA"
     s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii")
@@ -18,24 +19,19 @@ def slugify(value):
 # ---- Lecture
 df = SRC.get_dataframe()
 
-# ---- Écriture : un .xlsx par région, TOUT en TEXTE
+# ---- Écriture : un fichier Excel (.xlsx) par région, tout en TEXTE
 for region, sub in df.groupby(COL_REGION, dropna=False):
     safe = slugify(region)
     filename = f"{safe}_Run_649_EER_PART.xlsx"
 
-    # tout en str => Excel lira comme texte (zéros initiaux conservés)
+    # Tout en texte pour préserver les zéros initiaux (IDs, codes, etc.)
     sub_txt = sub.astype(str)
 
-    # buffer binaire + écriture .xlsx avec openpyxl
+    # Buffer binaire + écriture xlsx
     buf = io.BytesIO()
-    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+    with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
         sub_txt.to_excel(writer, index=False, sheet_name="Données")
-        # (optionnel) forcer explicitement le format texte sur toutes les cellules
-        ws = writer.sheets["Données"]
-        for row in ws.iter_rows(min_row=2):  # ignore l'entête
-            for cell in row:
-                cell.number_format = "@"
 
     OUT.upload_stream(filename, buf.getvalue())
 
-print("OK : fichiers Excel (.xlsx) créés par région, colonnes en texte (zéros préservés).")
+print("OK : fichiers Excel (.xlsx) créés par région, toutes les colonnes en texte.")
