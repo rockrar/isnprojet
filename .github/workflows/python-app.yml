@@ -5,9 +5,9 @@ import pandas as pd
 import xlsxwriter  # moteur pour écrire en .xlsx
 
 # ---- Inputs / Outputs
-SRC = dataiku.Dataset("Run_649_EER_PART_")   # ton dataset source
-OUT = dataiku.Folder("psWuQcPE")             # ton Managed Folder de sortie
-COL_REGION = "Libelle Region"                # nom exact de la colonne
+SRC = dataiku.Dataset("Run_649_EER_PART_")
+OUT = dataiku.Folder("psWuQcPE")
+COL_REGION = "Libelle Region"
 
 # ---- Utile : nom de fichier "safe"
 def slugify(value):
@@ -22,19 +22,26 @@ df = SRC.get_dataframe()
 # ---- On remplace les NaN dans la colonne région pour éviter erreur de groupement
 df[COL_REGION] = df[COL_REGION].fillna("NA")
 
-# ---- Écriture : un fichier Excel (.xlsx) par région, tout en TEXTE
+# ---- Écriture : un fichier Excel (.xlsx) par région, tout en TEXTE (0 préservés)
 for region, sub in df.groupby(COL_REGION):
     safe = slugify(region)
     filename = f"{safe}_Run_649_EER_PART.xlsx"
 
-    # Tout en texte pour préserver les zéros initiaux (IDs, codes, etc.)
+    # Convertir tout en texte
     sub_txt = sub.astype(str)
 
-    # Buffer binaire + écriture xlsx
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
         sub_txt.to_excel(writer, index=False, sheet_name="Données")
+        workbook  = writer.book
+        worksheet = writer.sheets["Données"]
+
+        # Créer un format texte
+        text_fmt = workbook.add_format({'num_format': '@'})
+
+        # Appliquer format texte sur toutes les colonnes (0 conservés)
+        worksheet.set_column(0, len(sub_txt.columns) - 1, None, text_fmt)
 
     OUT.upload_stream(filename, buf.getvalue())
 
-print("✅ OK : fichiers Excel (.xlsx) créés par région, toutes les colonnes en texte (zéros préservés).")
+print("✅ OK : fichiers Excel créés, toutes les colonnes forcées en texte (zéros initiaux visibles).")
