@@ -22,26 +22,33 @@ df = SRC.get_dataframe()
 # ---- On remplace les NaN dans la colonne région pour éviter erreur de groupement
 df[COL_REGION] = df[COL_REGION].fillna("NA")
 
-# ---- Écriture : un fichier Excel (.xlsx) par région, tout en TEXTE (0 préservés)
+# ---- Colonnes à forcer en texte (à ajuster selon ton dataset)
+TEXT_COLS = ["ID Unique", "ID Client", "Code", "Matricule"]  # complète ici si besoin
+
+# ---- Écriture : un fichier Excel (.xlsx) par région, TOUT en texte
 for region, sub in df.groupby(COL_REGION):
     safe = slugify(region)
     filename = f"{safe}_Run_649_EER_PART.xlsx"
 
-    # Convertir tout en texte
+    # Forcer les colonnes texte à être des strings exactes (avec zéros conservés)
+    for c in TEXT_COLS:
+        if c in sub.columns:
+            sub[c] = sub[c].apply(lambda x: str(x).zfill(len(str(x))) if pd.notna(x) else "")
+
+    # Convertir le reste en texte simple
     sub_txt = sub.astype(str)
 
+    # Écriture dans Excel
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
         sub_txt.to_excel(writer, index=False, sheet_name="Données")
-        workbook  = writer.book
+        workbook = writer.book
         worksheet = writer.sheets["Données"]
 
-        # Créer un format texte
+        # Forcer format texte dans Excel
         text_fmt = workbook.add_format({'num_format': '@'})
-
-        # Appliquer format texte sur toutes les colonnes (0 conservés)
         worksheet.set_column(0, len(sub_txt.columns) - 1, None, text_fmt)
 
     OUT.upload_stream(filename, buf.getvalue())
 
-print("✅ OK : fichiers Excel créés, toutes les colonnes forcées en texte (zéros initiaux visibles).")
+print("✅ OK : fichiers Excel créés avec 0 initiaux préservés sur les IDs et tout en texte.")
