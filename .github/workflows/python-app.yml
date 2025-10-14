@@ -2,56 +2,40 @@
 import io, re, unicodedata
 import dataiku
 import pandas as pd
-import xlsxwriter
 
-# ---- Inputs / Outputs
-SRC = dataiku.Dataset("Run_649_EER_PART_")     # dataset source
-OUT = dataiku.Folder("psWuQcPE")               # dossier de sortie
-COL_REGION = "Libelle Region"                  # nom de la colonne région
+# ---- Inputs / Outputs (comme dans ta recette)
+SRC = dataiku.Dataset("Run_649_EER_PART_")   # dataset source
+OUT = dataiku.Folder("psWuQcPE")             # managed folder de sortie
+COL_REGION = "Libelle Region"                # colonne région
 
-# ---- Fonction utilitaire pour noms de fichiers
+# ---- Util : nom de fichier sûr
 def slugify(value):
     s = str(value) if pd.notna(value) else "NA"
     s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii")
     s = re.sub(r"[^A-Za-z0-9_-]+", "_", s).strip("_")
     return s or "NA"
 
-# ---- Lecture du dataset
+# ---- Lecture
 df = SRC.get_dataframe()
 
-# ---- Écriture : un fichier Excel par région
+# ---- Écriture : un .xlsx par région, TOUT en TEXTE
 for region, sub in df.groupby(COL_REGION, dropna=False):
     safe = slugify(region)
     filename = f"{safe}_Run_649_EER_PART.xlsx"
 
-    # --- Nettoyage des dates ---
-    for col in sub.columns:
-        if any(k in col.lower() for k in ["date", "dt", "time", "timestamp"]):
-            sub[col] = pd.to_datetime(sub[col], errors="coerce").dt.strftime("%Y-%m-%d %H:%M:%S")
+    # tout en str => Excel lira comme texte (zéros initiaux conservés)
+    sub_txt = sub.astype(str)
 
-    # --- Forcer les colonnes longues ou sensibles en texte ---
-    for col in sub.columns:
-        if sub[col].astype(str).str.match(r"^\d{11,}$").any():  # >=11 chiffres
-            sub[col] = sub[col].astype(str).apply(lambda x: "'" + x if x and not str(x).startswith("'") else x)
+    # buffer binaire + écriture .xlsx avec openpyxl
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        sub_txt.to_excel(writer, index=False, sheet_name="Données")
+        # (optionnel) forcer explicitement le format texte sur toutes les cellules
+        ws = writer.sheets["Données"]
+        for row in ws.iter_rows(min_row=2):  # ignore l'entête
+            for cell in row:
+                cell.number_format = "@"
 
-    # --- Écriture Excel ---
-    with io.BytesIO() as buffer:
-        with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
-            sub.to_excel(writer, index=False, sheet_name="Données")
+    OUT.upload_stream(filename, buf.getvalue())
 
-            # format texte pour toutes les cellules
-            workbook  = writer.book
-            worksheet = writer.sheets["Données"]
-            fmt_text = workbook.add_format({'num_format': '@'})  # texte
-            fmt_date = workbook.add_format({'num_format': 'yyyy-mm-dd hh:mm:ss'})
-
-            for j, col in enumerate(sub.columns):
-                # si c’est une date -> format date sinon texte
-                if any(k in col.lower() for k in ["date", "dt", "time", "timestamp"]):
-                    worksheet.set_column(j, j, 20, fmt_date)
-                else:
-                    worksheet.set_column(j, j, 20, fmt_text)
-
-        OUT.upload_stream(filename, buffer.getvalue())
-
-print("✅ OK : fichiers Excel créés par région (dates propres, IDs conservés en texte).")
+print("OK : fichiers Excel (.xlsx) créés par région, colonnes en texte (zéros préservés).")
